@@ -29,7 +29,7 @@ pub fn main() anyerror!void {
     defer gpa.free(fileName);
 
     const stream = try std.net.connectUnixSocket(fileName);
-    try i3Send(stream, GET_TREE, &.{});
+    try i3SendLen(stream, GET_TREE, 0);
 
     const reader = stream.reader();
 
@@ -79,6 +79,11 @@ pub fn main() anyerror!void {
         }
     }
 
+    var maxLen: usize = 0;
+    for (windowNames.items) |windowName| {
+        maxLen = @maximum(maxLen, windowName.len);
+    }
+
     var process = std.ChildProcess.init(&[_][]const u8{ "dmenu", "-i", "-l", "10" }, gpa);
     process.stdin_behavior = .Pipe;
     process.stdout_behavior = .Pipe;
@@ -94,7 +99,7 @@ pub fn main() anyerror!void {
     process.stdin.?.close();
     process.stdin = null;
 
-    const stdout = try process.stdout.?.reader().readAllAlloc(gpa, std.math.maxInt(usize));
+    const stdout = try process.stdout.?.reader().readAllAlloc(gpa, maxLen);
     defer gpa.free(stdout);
 
     switch (try process.wait()) {
@@ -165,11 +170,6 @@ fn readAll(stream: std.net.Stream, gpa: std.mem.Allocator) !void {
     }
 
     std.debug.print("Buf {s}", .{messageBuf});
-}
-
-fn i3Send(stream: std.net.Stream, messageType: u32, message: []const u8) !void {
-    try i3SendLen(stream, messageType, message.len);
-    try stream.writer().writeAll(message);
 }
 
 fn i3SendLen(stream: std.net.Stream, messageType: u32, messageLen: usize) !void {
