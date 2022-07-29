@@ -79,11 +79,6 @@ pub fn main() anyerror!void {
         }
     }
 
-    var maxLen: usize = 0;
-    for (windowNames.items) |windowName| {
-        maxLen = @maximum(maxLen, windowName.len);
-    }
-
     var process = std.ChildProcess.init(&[_][]const u8{ "dmenu", "-i", "-l", "10" }, gpa);
     process.stdin_behavior = .Pipe;
     process.stdout_behavior = .Pipe;
@@ -99,7 +94,7 @@ pub fn main() anyerror!void {
     process.stdin.?.close();
     process.stdin = null;
 
-    const stdout = try process.stdout.?.reader().readAllAlloc(gpa, maxLen);
+    const stdout = try process.stdout.?.reader().readAllAlloc(gpa, 1024);
     defer gpa.free(stdout);
 
     switch (try process.wait()) {
