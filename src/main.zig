@@ -1,4 +1,5 @@
 const std = @import("std");
+const Dmenu = @import("dmenu.zig").Dmenu;
 
 const i3Error = error{
     MessageTooLong,
@@ -33,32 +34,8 @@ pub fn main() anyerror!void {
     const stream = try std.net.connectUnixSocket(fileName);
     try i3SendLen(stream, GET_TREE, 0);
 
-    const reader = stream.reader();
-
-    var magicBuf: [MAGIC.len]u8 = undefined;
-    const magicBufLen = try reader.read(magicBuf[0..]);
-    if (magicBufLen != MAGIC.len or !std.mem.eql(u8, magicBuf[0..], MAGIC)) {
-        const safeMagicBufLen = @minimum(magicBufLen, MAGIC.len);
-        std.log.err("Expected magic value '{s}', but received '{s}'. Terminating.", .{ MAGIC, magicBuf[0..safeMagicBufLen] });
-        return StateError.IllegalStateError;
-    }
-
-    const messageLength = try reader.readIntNative(u32);
-    const messageType = try reader.readIntNative(u32);
-
-    if (messageType != GET_TREE) {
-        std.log.err("Expected message type {d} in reply, but received {d}. Terminating.", .{ GET_TREE, messageType });
-        return StateError.IllegalStateError;
-    }
-
-    var messageBuf: []u8 = try gpa.alloc(u8, messageLength);
+    var messageBuf = try i3Recv(stream, gpa);
     defer gpa.free(messageBuf);
-
-    const messageBufLen = try reader.read(messageBuf);
-    if (messageBufLen != messageLength) {
-        std.log.err("Expected {d} bytes, but received {d}. Terminating.", .{ messageLength, messageBufLen });
-        return StateError.IllegalStateError;
-    }
 
     var tokens = std.json.TokenStream.init(messageBuf);
     const options = .{ .ignore_unknown_fields = true, .allocator = gpa };
@@ -70,68 +47,69 @@ pub fn main() anyerror!void {
     defer windowNames.deinit();
     var windowWorkspaces = try std.ArrayList(i8).initCapacity(gpa, 32);
     defer windowWorkspaces.deinit();
+    var windowIds = try std.ArrayList(u64).initCapacity(gpa, 32);
+    defer windowIds.deinit();
 
     for (json.nodes) |outputContainer| {
         for (outputContainer.nodes) |conContainer| {
             for (conContainer.nodes) |workspaceContainer| {
                 if (workspaceContainer.num) |num| {
-                    try fetchAllWindowsRecursively(workspaceContainer, num, &windowNames, &windowWorkspaces);
+                    try fetchWorkspace(workspaceContainer, num, &windowNames, &windowWorkspaces, &windowIds);
                 }
             }
         }
     }
 
-    var process = std.ChildProcess.init(&[_][]const u8{ "dmenu", "-i", "-l", "10" }, gpa);
-    process.stdin_behavior = .Pipe;
-    process.stdout_behavior = .Pipe;
+    var windowNamesFormatted = try gpa.alloc([]u8, windowNames.items.len);
+    var windowIndex: u32 = 0;
+    defer {
+        var freeIndex: u32 = 0;
+        while (freeIndex < windowIndex) : (freeIndex += 1) {
+            gpa.free(windowNamesFormatted[freeIndex]);
+        }
+        gpa.free(windowNamesFormatted);
+    }
+    while (windowIndex < windowNames.items.len) : (windowIndex += 1) {
+        windowNamesFormatted[windowIndex] = try std.fmt.allocPrint(gpa, "{s} ({d})\n", .{ windowNames.items[windowIndex], windowWorkspaces.items[windowIndex] });
+    }
 
-    try process.spawn();
+    var selector = Dmenu.init(gpa);
+    try selector.start();
 
     var index: u32 = 0;
-    while (index < windowNames.items.len) {
-        try process.stdin.?.writer().print("{s} ({d})\n", .{ windowNames.items[index], windowWorkspaces.items[index] });
+    while (index < windowNamesFormatted.len) {
+        try selector.writer().writeAll(windowNamesFormatted[index]);
         index += 1;
     }
 
-    process.stdin.?.close();
-    process.stdin = null;
-
-    const stdout = try process.stdout.?.reader().readAllAlloc(gpa, 1024);
+    const stdout = try selector.readAll(gpa, 1024);
     defer gpa.free(stdout);
 
-    switch (try process.wait()) {
-        .Exited => |status| {
-            if (status == 1) {
-                // user decided not to choose any option
-                std.log.info("Terminating with no action taken", .{});
-                return;
-            } else if (status != 0) {
-                return StateError.CommandFailed;
-            }
-        },
-        .Signal, .Stopped, .Unknown => {
-            return StateError.CommandFailed;
-        },
-    }
-
     var findIndex: u32 = 0;
-    var intBuf: [16]u8 = undefined;
-    var prettyIntBuf: [22]u8 = undefined;
-    while (findIndex < windowNames.items.len) {
-        const windowName = windowNames.items[findIndex];
-        const intAsStr = try std.fmt.bufPrint(intBuf[0..], "{d}", .{windowWorkspaces.items[findIndex]});
-        const intBufSlice = try std.fmt.bufPrint(prettyIntBuf[0..], " ({s})\n", .{intAsStr});
+    while (findIndex < windowNamesFormatted.len) {
+        if (stdout.len == windowNamesFormatted[findIndex].len and std.mem.eql(u8, stdout[0..], windowNamesFormatted[findIndex])) {
+            var intBuf: [16]u8 = undefined;
 
-        const middleLen = windowName.len;
-        const endLen = middleLen + intBufSlice.len;
-
-        if (stdout.len == endLen and std.mem.eql(u8, stdout[0..middleLen], windowName) and std.mem.eql(u8, stdout[middleLen..endLen], intBufSlice)) {
-            std.log.info("Switching to workspace number {d}\n", .{windowWorkspaces.items[findIndex]});
-            const command = "workspace number ";
-            try i3SendLen(stream, RUN_COMMAND, command.len + intAsStr.len);
-            const writer = stream.writer();
-            try writer.writeAll(command);
-            try writer.writeAll(intAsStr);
+            if (false) {
+                const intAsStr = try std.fmt.bufPrint(intBuf[0..], "{d}", .{windowWorkspaces.items[findIndex]});
+                std.log.info("Switching to workspace number {d}", .{windowWorkspaces.items[findIndex]});
+                const command = "workspace number ";
+                try i3SendLen(stream, RUN_COMMAND, command.len + intAsStr.len);
+                const writer = stream.writer();
+                try writer.writeAll(command);
+                try writer.writeAll(intAsStr);
+            } else {
+                const intAsStr = try std.fmt.bufPrint(intBuf[0..], "{d}", .{windowIds.items[findIndex]});
+                std.log.info("Focusing window {s} in workspace {d}", .{ windowNames.items[findIndex], windowWorkspaces.items[findIndex] });
+                const commandPrefix = "[id=";
+                const commandSuffix = "] focus";
+                const totalLen = commandPrefix.len + intAsStr.len + commandSuffix.len;
+                try i3SendLen(stream, RUN_COMMAND, totalLen);
+                const writer = stream.writer();
+                try writer.writeAll(commandPrefix);
+                try writer.writeAll(intAsStr);
+                try writer.writeAll(commandSuffix);
+            }
             return;
         }
         findIndex += 1;
@@ -180,15 +158,47 @@ fn i3SendLen(stream: std.net.Stream, messageType: u32, messageLen: usize) !void 
     try writer.writeIntNative(u32, messageType);
 }
 
-fn fetchAllWindowsRecursively(container: i3Container, workspace: i8, windowNames: *std.ArrayList([]u8), windowWorkspaces: *std.ArrayList(i8)) std.mem.Allocator.Error!void {
+fn i3Recv(stream: std.net.Stream, gpa: std.mem.Allocator) ![]u8 {
+    const reader = stream.reader();
+
+    var magicBuf: [MAGIC.len]u8 = undefined;
+    const magicBufLen = try reader.read(magicBuf[0..]);
+    if (magicBufLen != MAGIC.len or !std.mem.eql(u8, magicBuf[0..], MAGIC)) {
+        const safeMagicBufLen = @minimum(magicBufLen, MAGIC.len);
+        std.log.err("Expected magic value '{s}', but received '{s}'. Terminating.", .{ MAGIC, magicBuf[0..safeMagicBufLen] });
+        return StateError.IllegalStateError;
+    }
+
+    const messageLength = try reader.readIntNative(u32);
+    const messageType = try reader.readIntNative(u32);
+
+    if (messageType != GET_TREE) {
+        std.log.err("Expected message type {d} in reply, but received {d}. Terminating.", .{ GET_TREE, messageType });
+        return StateError.IllegalStateError;
+    }
+
+    var messageBuf: []u8 = try gpa.alloc(u8, messageLength);
+    errdefer gpa.free(messageBuf);
+
+    const messageBufLen = try reader.read(messageBuf);
+    if (messageBufLen != messageLength) {
+        std.log.err("Expected {d} bytes, but received {d}. Terminating.", .{ messageLength, messageBufLen });
+        return StateError.IllegalStateError;
+    }
+
+    return messageBuf;
+}
+
+fn fetchWorkspace(container: i3Container, workspace: i8, windowNames: *std.ArrayList([]u8), windowWorkspaces: *std.ArrayList(i8), windowIds: *std.ArrayList(u64)) std.mem.Allocator.Error!void {
     try windowNames.ensureUnusedCapacity(container.nodes.len);
     try windowWorkspaces.ensureUnusedCapacity(container.nodes.len);
     for (container.nodes) |windowConContainer| {
         if (windowConContainer.name) |name| {
             try windowNames.append(name);
             try windowWorkspaces.append(workspace);
+            try windowIds.append(windowConContainer.window.?);
         }
-        try fetchAllWindowsRecursively(windowConContainer, workspace, windowNames, windowWorkspaces);
+        try fetchWorkspace(windowConContainer, workspace, windowNames, windowWorkspaces, windowIds);
     }
 }
 
