@@ -1,11 +1,12 @@
 const std = @import("std");
 
-const SocketPathError = error{
-    CommandFailed,
-};
-
 const i3Error = error{
     MessageTooLong,
+};
+
+const StateError = error{
+    IllegalStateError,
+    CommandFailed,
 };
 
 const i3Container = struct {
@@ -22,6 +23,7 @@ const GET_TREE: u32 = 4;
 
 pub fn main() anyerror!void {
     var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = general_purpose_allocator.deinit();
     const gpa = general_purpose_allocator.allocator();
 
     // stdout comes with a newline, chop it off
@@ -38,7 +40,7 @@ pub fn main() anyerror!void {
     if (magicBufLen != MAGIC.len or !std.mem.eql(u8, magicBuf[0..], MAGIC)) {
         const safeMagicBufLen = @minimum(magicBufLen, MAGIC.len);
         std.log.err("Expected magic value '{s}', but received '{s}'. Terminating.", .{ MAGIC, magicBuf[0..safeMagicBufLen] });
-        std.process.exit(1);
+        return StateError.IllegalStateError;
     }
 
     const messageLength = try reader.readIntNative(u32);
@@ -46,7 +48,7 @@ pub fn main() anyerror!void {
 
     if (messageType != GET_TREE) {
         std.log.err("Expected message type {d} in reply, but received {d}. Terminating.", .{ GET_TREE, messageType });
-        std.process.exit(1);
+        return StateError.IllegalStateError;
     }
 
     var messageBuf: []u8 = try gpa.alloc(u8, messageLength);
@@ -55,7 +57,7 @@ pub fn main() anyerror!void {
     const messageBufLen = try reader.read(messageBuf);
     if (messageBufLen != messageLength) {
         std.log.err("Expected {d} bytes, but received {d}. Terminating.", .{ messageLength, messageBufLen });
-        std.process.exit(1);
+        return StateError.IllegalStateError;
     }
 
     var tokens = std.json.TokenStream.init(messageBuf);
@@ -101,13 +103,14 @@ pub fn main() anyerror!void {
         .Exited => |status| {
             if (status == 1) {
                 // user decided not to choose any option
-                std.process.exit(0);
+                std.log.info("Terminating with no action taken", .{});
+                return;
             } else if (status != 0) {
                 std.process.exit(1);
             }
         },
         .Signal, .Stopped, .Unknown => {
-            std.process.exit(1);
+            return StateError.IllegalStateError;
         },
     }
 
@@ -123,7 +126,7 @@ pub fn main() anyerror!void {
         const endLen = middleLen + intBufSlice.len;
 
         if (stdout.len == endLen and std.mem.eql(u8, stdout[0..middleLen], windowName) and std.mem.eql(u8, stdout[middleLen..endLen], intBufSlice)) {
-            std.debug.print("Switching to workspace number {d}\n", .{windowWorkspaces.items[findIndex]});
+            std.log.info("Switching to workspace number {d}\n", .{windowWorkspaces.items[findIndex]});
             const command = "workspace number ";
             try i3SendLen(stream, RUN_COMMAND, command.len + intAsStr.len);
             const writer = stream.writer();
@@ -144,7 +147,7 @@ fn readAll(stream: std.net.Stream, gpa: std.mem.Allocator) !void {
     if (magicBufLen != MAGIC.len or !std.mem.eql(u8, magicBuf[0..], MAGIC)) {
         const safeMagicBufLen = @minimum(magicBufLen, MAGIC.len);
         std.log.err("Expected magic value '{s}', but received '{s}'. Terminating.", .{ MAGIC, magicBuf[0..safeMagicBufLen] });
-        std.process.exit(1);
+        return StateError.IllegalStateError;
     }
 
     const messageLength = try reader.readIntNative(u32);
@@ -152,7 +155,7 @@ fn readAll(stream: std.net.Stream, gpa: std.mem.Allocator) !void {
 
     if (messageType != 0) {
         std.log.err("Expected message type {d} in reply, but received {d}. Terminating.", .{ GET_TREE, messageType });
-        std.process.exit(1);
+        return StateError.IllegalStateError;
     }
 
     var messageBuf: []u8 = try gpa.alloc(u8, messageLength);
@@ -161,7 +164,7 @@ fn readAll(stream: std.net.Stream, gpa: std.mem.Allocator) !void {
     const messageBufLen = try reader.read(messageBuf);
     if (messageBufLen != messageLength) {
         std.log.err("Expected {d} bytes, but received {d}. Terminating.", .{ messageLength, messageBufLen });
-        std.process.exit(1);
+        return StateError.IllegalStateError;
     }
 
     std.debug.print("Buf {s}", .{messageBuf});
@@ -198,12 +201,12 @@ fn getSocketPath(allocator: std.mem.Allocator) ![]u8 {
         .Exited => |status| {
             if (status != 0) {
                 std.log.err("i3 exec was terminated with non-successful code {d}. Terminating.", .{status});
-                return SocketPathError.CommandFailed;
+                return StateError.CommandFailed;
             }
         },
         .Signal, .Stopped, .Unknown => {
             std.log.err("i3 exec was stopped. Terminating.", .{});
-            return SocketPathError.CommandFailed;
+            return StateError.CommandFailed;
         },
     }
 
