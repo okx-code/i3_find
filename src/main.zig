@@ -106,11 +106,11 @@ pub fn main() anyerror!void {
                 std.log.info("Terminating with no action taken", .{});
                 return;
             } else if (status != 0) {
-                std.process.exit(1);
+                return StateError.CommandFailed;
             }
         },
         .Signal, .Stopped, .Unknown => {
-            return StateError.IllegalStateError;
+            return StateError.CommandFailed;
         },
     }
 
