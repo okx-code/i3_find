@@ -73,7 +73,8 @@ pub fn main() anyerror!void {
         windowNamesFormatted[windowIndex] = try std.fmt.allocPrint(gpa, "{s} ({d})\n", .{ windowNames.items[windowIndex], windowWorkspaces.items[windowIndex] });
     }
 
-    var selector = Dmenu.init(gpa);
+    var selector = try Dmenu.init(gpa);
+    defer selector.deinit();
     try selector.start();
 
     var index: u32 = 0;
@@ -82,16 +83,16 @@ pub fn main() anyerror!void {
         index += 1;
     }
 
-    const stdout = try selector.readAll(gpa, 1024);
+    const stdout = (try selector.readAll(gpa, 1024)) orelse return;
     defer gpa.free(stdout);
 
     var findIndex: u32 = 0;
     while (findIndex < windowNamesFormatted.len) {
-        if (stdout.len == windowNamesFormatted[findIndex].len and std.mem.eql(u8, stdout[0..], windowNamesFormatted[findIndex])) {
+        if (stdout.len == windowNamesFormatted[findIndex].len and std.mem.eql(u8, stdout, windowNamesFormatted[findIndex])) {
             var intBuf: [16]u8 = undefined;
 
             if (false) {
-                const intAsStr = try std.fmt.bufPrint(intBuf[0..], "{d}", .{windowWorkspaces.items[findIndex]});
+                const intAsStr = try std.fmt.bufPrint(&intBuf, "{d}", .{windowWorkspaces.items[findIndex]});
                 std.log.info("Switching to workspace number {d}", .{windowWorkspaces.items[findIndex]});
                 const command = "workspace number ";
                 try i3SendLen(stream, RUN_COMMAND, command.len + intAsStr.len);
@@ -99,7 +100,7 @@ pub fn main() anyerror!void {
                 try writer.writeAll(command);
                 try writer.writeAll(intAsStr);
             } else {
-                const intAsStr = try std.fmt.bufPrint(intBuf[0..], "{d}", .{windowIds.items[findIndex]});
+                const intAsStr = try std.fmt.bufPrint(&intBuf, "{d}", .{windowIds.items[findIndex]});
                 std.log.info("Focusing window {s} in workspace {d}", .{ windowNames.items[findIndex], windowWorkspaces.items[findIndex] });
                 const commandPrefix = "[id=";
                 const commandSuffix = "] focus";
@@ -220,5 +221,5 @@ fn getSocketPath(allocator: std.mem.Allocator) ![]u8 {
         },
     }
 
-    return result.stdout[0..@maximum(0, result.stdout.len - 1)];
+    return result.stdout[0 .. @maximum(1, result.stdout.len) - 1];
 }
